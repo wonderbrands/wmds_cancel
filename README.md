@@ -6,8 +6,6 @@ que ya había salido de su ubicación a **`WH/Guarderia_Cancelacion`**, usando u
 
 > **Estado:** en uso, con tests automáticos. Depende de `wmds` y `sale_stock`; se activa desde
 > **WMDS → Configuración → Ajustes → Complementos → Cancelaciones**.
->
-> Antes se llamaba `wb_so_cancel_guarderia`. Para migrar una BD que ya lo tenía instalado, ver §5b.
 
 ---
 
@@ -89,18 +87,6 @@ OUT por 1 y CAN `Output → Guardería` por 1.
 4. Antes de desinstalarlo, resolver los OUT retenidos: al desinstalar se borran sus campos (la ubicación Guardería y
    los movimientos hechos se conservan).
 
-## 5b. Migrar desde `wb_so_cancel_guarderia`
-
-Solo para BD que tenían instalado el módulo con su nombre anterior. Conserva Guardería, WH/CAN, la configuración por
-almacén, los OUT retenidos y las decisiones por EI. Con Odoo detenido y un respaldo de la BD:
-
-```bash
-psql -d <bd> -f odoo/addons-custom/wmds_cancel/scripts/rename_from_wb_so_cancel_guarderia.sql
-odoo -c odoo.conf -d <bd> -u wmds,wmds_cancel --stop-after-init
-```
-
-El script es idempotente: si no encuentra `wb_so_cancel_guarderia`, no cambia nada.
-
 **Dónde se configura:** Inventario → Configuración → Almacenes → *(almacén)* → pestaña **Configuración del
 almacén** → grupo **Cancelaciones de venta** (visible solo con entrega en 3 pasos).
 
@@ -178,7 +164,6 @@ wmds_cancel/
 ├── views/stock_warehouse_views.xml
 ├── views/dispatch_hold_views.xml   # botón en la SO, aviso en el OUT, asistente
 ├── hooks.py                    # configura almacenes de 3 pasos al instalar
-├── scripts/rename_from_wb_so_cancel_guarderia.sql  # migración del nombre anterior
 ├── tests/test_cancel_relocation.py
 ├── tests/test_wmds_dispatch_hold.py
 └── docs/SOP_operador_cancelaciones.md
