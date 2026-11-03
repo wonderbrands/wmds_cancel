@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_wb_dispatch_hold_wizard_form" model="ir.ui.view">
+        <field name="name">wb.dispatch.hold.wizard.form</field>
+        <field name="model">wb.dispatch.hold.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Resolver despacho retenido">
+                <p>
+                    Esta orden se canceló mientras sus paquetes estaban en despacho.
+                    Indica cuántas piezas de cada producto <strong>se fueron con el carrier</strong>:
+                    se entregarán al cliente como una venta normal. El resto se trasladará a Guardería.
+                </p>
+                <field name="sale_order_id" invisible="1"/>
+                <field name="line_ids">
+                    <list editable="bottom" create="0" delete="0">
+                        <field name="product_id"/>
+                        <field name="qty_out"/>
+                        <field name="qty_shipped"/>
+                    </list>
+                </field>
+                <footer>
+                    <button name="action_confirm" type="object" string="Confirmar" class="btn-primary"/>
+                    <button special="cancel" string="Cancelar"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_order_form_wb_dispatch_hold" model="ir.ui.view">
+        <field name="name">sale.order.form.wb.dispatch.hold</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//header" position="inside">
+                <field name="wb_dispatch_hold_count" invisible="1"/>
+                <button name="action_wb_open_dispatch_hold_wizard" type="object"
+                        string="Resolver despacho retenido" class="btn-warning"
+                        groups="stock.group_stock_user"
+                        invisible="wb_dispatch_hold_count == 0"/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="view_picking_form_wb_dispatch_hold" model="ir.ui.view">
+        <field name="name">stock.picking.form.wb.dispatch.hold</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet" position="before">
+                <div class="alert alert-warning mb-0" role="alert" invisible="not wb_dispatch_hold">
+                    OUT retenido: la orden se canceló durante el despacho. Se resolverá al cerrar
+                    el despacho en WMDs o con el botón «Resolver despacho retenido» de la orden de venta.
+                </div>
+            </xpath>
+            <xpath expr="//field[@name='origin']" position="after">
+                <field name="wb_dispatch_hold" invisible="not wb_dispatch_hold"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

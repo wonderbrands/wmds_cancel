@@ -1,17 +1,23 @@
 import logging
 from collections import defaultdict
 
-from odoo import _, models
+from odoo import _, fields, models
 from odoo.tools import float_compare
 
 _logger = logging.getLogger(__name__)
 
-# Campo de WMDs con las piezas ya recolectadas en una línea de PICK (módulo opcional).
+# Campo de WMDs con las piezas ya recolectadas en una línea de PICK.
 PICKED_FIELD = 'wmds_picked_qty'
 
 
 class SaleOrder(models.Model):
     _inherit = 'sale.order'
+
+    wb_dispatch_hold_count = fields.Integer(compute='_compute_wb_dispatch_hold_count')
+
+    def _compute_wb_dispatch_hold_count(self):
+        for so in self:
+            so.wb_dispatch_hold_count = len(so._wb_held_pickings())
 
     def _action_cancel(self):
         # Solo SO confirmadas (con flujo de stock generado).
@@ -23,27 +29,144 @@ class SaleOrder(models.Model):
                 in_progress[so.id] = so._wb_collect_picked_in_progress()
             except Exception:
                 _logger.exception(
-                    "wb_so_cancel_guarderia: fallo al leer recolección en curso de %s", so.name)
-        # sale_stock cancela primero los pickings no 'done' (libera reservas) y
-        # luego sale.order escribe state='cancel': al volver de super() el stock ya está libre.
-        res = super()._action_cancel()
-        for so in to_relocate:
+                    "wmds_cancel: fallo al leer recolección en curso de %s", so.name)
+            # SO en despacho: su OUT se retiene (no se cancela) hasta que el despachador
+            # indique qué se embarcó. Ver _wb_resolve_dispatch_hold().
             try:
                 with self.env.cr.savepoint():
-                    so._wb_relocate_cancelled_stock(in_progress.get(so.id))
+                    so._wb_hold_out_if_in_dispatch()
             except Exception:
                 _logger.exception(
-                    "wb_so_cancel_guarderia: fallo al reubicar stock de %s", so.name)
-                try:
-                    with self.env.cr.savepoint():
-                        so.message_post(body=_(
-                            "ATENCIÓN: no se pudo generar el traslado de cancelación. "
-                            "Revise el log del servidor y reubique el stock manualmente."))
-                except Exception:
-                    # Ni siquiera el aviso debe bloquear la cancelación.
-                    _logger.exception(
-                        "wb_so_cancel_guarderia: no se pudo dejar el aviso en %s", so.name)
+                    "wmds_cancel: fallo al retener el OUT de %s", so.name)
+        # sale_stock cancela primero los pickings no 'done' (libera reservas) y
+        # luego sale.order escribe state='cancel': al volver de super() el stock ya está libre.
+        # El contexto evita que se cancelen los OUT retenidos.
+        res = super(SaleOrder, self.with_context(wb_keep_dispatch_hold=True))._action_cancel()
+        for so in to_relocate:
+            so._wb_safe_relocate(in_progress.get(so.id))
         return res
+
+    def _wb_safe_relocate(self, in_progress=None):
+        """Reubica sin bloquear nunca: cualquier fallo queda en log y en el chatter."""
+        self.ensure_one()
+        try:
+            with self.env.cr.savepoint():
+                self._wb_relocate_cancelled_stock(in_progress)
+        except Exception:
+            _logger.exception(
+                "wmds_cancel: fallo al reubicar stock de %s", self.name)
+            self._wb_post_safe(_(
+                "ATENCIÓN: no se pudo generar el traslado de cancelación. "
+                "Revise el log del servidor y reubique el stock manualmente."))
+
+    def _wb_post_safe(self, body):
+        try:
+            with self.env.cr.savepoint():
+                self.sudo().message_post(body=body)
+        except Exception:
+            # Ni siquiera el aviso debe bloquear la cancelación.
+            _logger.exception("wmds_cancel: no se pudo dejar el aviso en %s", self.name)
+
+    # ------------------------------------------------------------------
+    # Despacho en curso: retención del OUT
+    # ------------------------------------------------------------------
+    def _wb_is_in_dispatch(self):
+        """¿La SO está en proceso de despacho (paquetes posiblemente ya en el contenedor
+        del carrier)? Sí, si alguna de sus EI está en una sesión de despacho activa de
+        WMDs o ya se entregó a la paquetería."""
+        tags = self.sudo().ei
+        if any(tags.mapped('dispatched')):
+            return True
+        names = tags.mapped('display_name_custom')
+        return bool(names) and bool(self.env['wmds.dispatch.session.line'].sudo().search_count([
+            ('ei_name', 'in', names),
+            ('session_id.state', '=', 'active'),
+        ]))
+
+    def _wb_held_pickings(self):
+        return self.sudo().picking_ids.filtered(
+            lambda p: p.wb_dispatch_hold and p.state not in ('done', 'cancel'))
+
+    def _wb_hold_out_if_in_dispatch(self):
+        self.ensure_one()
+        so = self.sudo()
+        wh = so.warehouse_id
+        if not wh or not so._wb_is_in_dispatch():
+            return
+        outs = so.picking_ids.filtered(
+            lambda p: p.picking_type_id == wh.out_type_id and p.state not in ('done', 'cancel'))
+        if not outs:
+            return
+        outs.write({'wb_dispatch_hold': True})
+        self._wb_post_safe(_(
+            "Cancelación durante el despacho: el OUT %s queda RETENIDO hasta que el "
+            "despachador indique qué paquetes ya se embarcaron.", ", ".join(outs.mapped('name'))))
+
+    def _wb_resolve_dispatch_hold(self, shipped=None):
+        """Cierra la retención del OUT de una SO cancelada en despacho.
+
+        :param shipped: {product_id: cantidad embarcada (UdM del producto)}. Vacío o
+            None = no se embarcó nada.
+        Valida el OUT solo por lo embarcado (sale al cliente como una venta normal),
+        cancela el resto sin backorder y reubica a Guardería lo que quedó en Output.
+        :return: True si había OUT retenido.
+        """
+        self.ensure_one()
+        so = self.sudo()
+        held = so._wb_held_pickings()
+        if not held:
+            return False
+        remaining = defaultdict(float)
+        for product_id, qty in (shipped or {}).items():
+            remaining[int(product_id)] += qty
+        delivered = []
+        for picking in held:
+            picking.wb_dispatch_hold = False
+            has_qty = False
+            for move in picking.move_ids.filtered(lambda m: m.state not in ('done', 'cancel')):
+                product = move.product_id
+                take = min(remaining[product.id], move.product_uom._compute_quantity(
+                    move.product_uom_qty, product.uom_id, round=False))
+                if float_compare(take, 0.0, precision_rounding=product.uom_id.rounding) > 0:
+                    remaining[product.id] -= take
+                    move.quantity = product.uom_id._compute_quantity(take, move.product_uom)
+                    move.picked = True
+                    has_qty = True
+                    delivered.append("%s x %s" % (product.display_name, take))
+                else:
+                    move.quantity = 0
+                    move.picked = False
+            if has_qty:
+                picking.with_context(
+                    skip_backorder=True, picking_ids_not_to_backorder=picking.ids,
+                    skip_sms=True, skip_immediate=True, wb_keep_dispatch_hold=False,
+                ).button_validate()
+            else:
+                picking.action_cancel()
+        extra = ["%s x %s" % (self.env['product.product'].browse(pid).display_name, qty)
+                 for pid, qty in remaining.items() if qty > 0]
+        if delivered:
+            msg = _("Despacho tras cancelación: se entregó al carrier %s.", "; ".join(delivered))
+        else:
+            msg = _("Despacho tras cancelación: no se embarcó nada; el OUT se canceló.")
+        if extra:
+            msg += " " + _("ATENCIÓN: se reportó como embarcado más de lo que tenía el OUT: %s.",
+                           "; ".join(extra))
+        self._wb_post_safe(msg)
+        # Lo que se quedó en Output (no embarcado) va a Guardería.
+        so._wb_safe_relocate()
+        return True
+
+    def action_wb_open_dispatch_hold_wizard(self):
+        self.ensure_one()
+        return {
+            'type': 'ir.actions.act_window',
+            'name': _("Resolver despacho retenido"),
+            'res_model': 'wb.dispatch.hold.wizard',
+            'view_mode': 'form',
+            'target': 'new',
+            'context': {'default_sale_order_id': self.id},
+        }
 
     def _wb_collect_picked_in_progress(self):
         """Unidades ya recolectadas (según WMDs) en PICK sin validar.
@@ -74,7 +197,7 @@ class SaleOrder(models.Model):
                 ).button_validate()
         except Exception:
             _logger.exception(
-                "wb_so_cancel_guarderia: no se pudo validar automáticamente %s", picking.name)
+                "wmds_cancel: no se pudo validar automáticamente %s", picking.name)
 
     def _wb_relocate_cancelled_stock(self, in_progress=None):
         self.ensure_one()
@@ -96,6 +219,10 @@ class SaleOrder(models.Model):
         out_loc = wh.wh_output_stock_loc_id
         watch = pack_loc | out_loc  # ubicaciones que se vigilan/reportan
         scope = (out_loc | pack_loc) if wh.wb_cancel_include_pack_zone else out_loc
+        if so._wb_held_pickings():
+            # El stock de Output pertenece al OUT retenido: se decide al cerrar el despacho.
+            watch -= out_loc
+            scope -= out_loc
         origin = "Cancelacion %s" % so.name  # no traducir: se usa para idempotencia
 
         # 1) Saldo neto por (ubicación, producto) dejado por el flujo de ESTA SO.
