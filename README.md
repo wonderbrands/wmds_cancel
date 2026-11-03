@@ -1,11 +1,13 @@
-# Cancelaciones de venta → Guardería (`wb_so_cancel_guarderia`)
+# WMDs · Cancelaciones (`wmds_cancel`)
 
-Módulo de Odoo 18 Enterprise que, al **cancelar una orden de venta (SO)**, traslada automáticamente el stock
+Complemento de **WMDs** para Odoo 18 Enterprise que, al **cancelar una orden de venta (SO)**, traslada automáticamente el stock
 que ya había salido de su ubicación a **`WH/Guarderia_Cancelacion`**, usando un tipo de operación propio
 **`WH/CAN` («Traslados de Cancelación»)**.
 
-> **Estado:** Fase 1 completa, probada con tests automáticos (17) y en el ambiente del usuario (incluida la
-> recolección en curso con WMDs real). Depende solo de `sale_stock`.
+> **Estado:** en uso, con tests automáticos. Depende de `wmds` y `sale_stock`; se activa desde
+> **WMDS → Configuración → Ajustes → Complementos → Cancelaciones**.
+>
+> Antes se llamaba `wb_so_cancel_guarderia`. Para migrar una BD que ya lo tenía instalado, ver §5b.
 
 ---
 
@@ -52,8 +54,8 @@ carrier y no se pueden sacar.
 
 1. **Al cancelar:** si la SO está "en despacho", su OUT **no se cancela**: queda *retenido* (`wb_dispatch_hold`).
    La SO sí queda cancelada (marketplace y facturación correctos). No se crea CAN de `Output` todavía.
-   - "En despacho" lo responde el método gancho `sale.order._wb_is_in_dispatch()`. Este módulo devuelve `False`;
-     **WMDs** lo sobrescribe: alguna EI de la SO está en una sesión de despacho activa o ya se entregó a la paquetería.
+   - "En despacho" (`sale.order._wb_is_in_dispatch()`): alguna EI de la SO está en una sesión de despacho activa de
+     WMDs o ya se entregó a la paquetería.
 2. **En el despacho (WMDs):** el modal de cancelados permite, por EI, **retirarla** (escanear, como antes) o marcar
    **«Ya se embarcó»**. Si la SO tiene varios productos, se elige el producto (1 EI = 1 pieza).
 3. **Al cerrar el despacho** ("Entregar a paquetería") se llama `sale.order._wb_resolve_dispatch_hold({producto: piezas})`:
@@ -79,10 +81,25 @@ OUT por 1 y CAN `Output → Guardería` por 1.
 
 ## 5. Instalación y configuración
 
-1. El módulo está en `odoo/addons-custom/`. Instalar `wb_so_cancel_guarderia`.
+1. El módulo está en `odoo/addons-custom/wmds_cancel`. Activarlo en **WMDS → Configuración → Ajustes →
+   Complementos → Cancelaciones** y guardar (equivale a instalar `wmds_cancel`). Desmarcarlo lo desinstala.
 2. Al instalar, se configuran solos los almacenes con entrega en 3 pasos (ubicación Guardería + tipo CAN).
    Para otros almacenes: usar el botón **Configurar flujo de cancelación** (es idempotente).
-3. Si ya estaba instalado: actualizar con `-u wb_so_cancel_guarderia` para ver los campos nuevos.
+3. Si ya estaba instalado: actualizar con `-u wmds_cancel` para ver los campos nuevos.
+4. Antes de desinstalarlo, resolver los OUT retenidos: al desinstalar se borran sus campos (la ubicación Guardería y
+   los movimientos hechos se conservan).
+
+## 5b. Migrar desde `wb_so_cancel_guarderia`
+
+Solo para BD que tenían instalado el módulo con su nombre anterior. Conserva Guardería, WH/CAN, la configuración por
+almacén, los OUT retenidos y las decisiones por EI. Con Odoo detenido y un respaldo de la BD:
+
+```bash
+psql -d <bd> -f odoo/addons-custom/wmds_cancel/scripts/rename_from_wb_so_cancel_guarderia.sql
+odoo -c odoo.conf -d <bd> -u wmds,wmds_cancel --stop-after-init
+```
+
+El script es idempotente: si no encuentra `wb_so_cancel_guarderia`, no cambia nada.
 
 **Dónde se configura:** Inventario → Configuración → Almacenes → *(almacén)* → pestaña **Configuración del
 almacén** → grupo **Cancelaciones de venta** (visible solo con entrega en 3 pasos).
@@ -92,7 +109,7 @@ almacén** → grupo **Cancelaciones de venta** (visible solo con entrega en 3 p
 | Ubicación Guardería | Destino de los traslados (interna, barcode `<WH>GUARDERIA`). | Se crea sola |
 | Tipo de operación de cancelación | El tipo CAN (barcode `<WH>CAN`, reserva al confirmar, backorder siempre). | Se crea solo |
 | Incluir Packing Zone | Reubica también lo que quedó en `Packing Zone`. | Sí |
-| Incluir recolección en curso | Traslada lo ya recolectado en WMDs cuando el PICK no se validó. Requiere WMDs. | No |
+| Incluir recolección en curso | Traslada lo ya recolectado en WMDs cuando el PICK no se validó. | No |
 | Validar CAN automáticamente | Valida el CAN al instante si queda totalmente reservado. | No |
 
 > ⚠️ **Validar CAN automáticamente** mueve el stock en el sistema sin que el operador lo lleve físicamente a
@@ -131,7 +148,7 @@ Ver el SOP para operadores: [`docs/SOP_operador_cancelaciones.md`](docs/SOP_oper
 
 ## 9. Pruebas
 
-22 tests (`tests/test_cancel_relocation.py`) + 9 de integración en WMDs (`wmds/tests/test_cancel_dispatch_hold.py`): flujo completo, PICK sin validar, Packing Zone incluida/excluida, dos SO
+22 tests (`tests/test_cancel_relocation.py`) + 9 del despacho en WMDs (`tests/test_wmds_dispatch_hold.py`): flujo completo, PICK sin validar, Packing Zone incluida/excluida, dos SO
 en la misma zona, reapertura sin duplicados, usuario de Ventas, fallo forzado, configuración idempotente, entrega parcial,
 SO en borrador, almacén sin configurar, paquetes, validación automática, recolección en curso y OUT retenido por
 despacho (retención, todo embarcado, parcial, nada embarcado, asistente manual; en WMDs: modal, retiro total, sesión
@@ -141,24 +158,29 @@ prueba con un campo sustituto (`x_wmds_picked_qty`); en el ambiente real se vali
 ```bash
 cd <carpeta-raiz-de-odoo>
 PYTHONPATH=. .venv/bin/python3 setup/odoo -c odoo.conf -d wb_cancel_test \
-  -i sale_stock,stock_barcode,wb_so_cancel_guarderia --without-demo=all \
-  --test-tags /wb_so_cancel_guarderia --stop-after-init --http-port=8099 --log-level=test
+  -i wb_sale_wholesale_approval,wmds,wmds_cancel --without-demo=all \
+  --test-tags /wmds_cancel --stop-after-init --http-port=8099 --log-level=test
 ```
-Usar siempre una BD desechable (`wb_cancel_test`), nunca la de producción.
+Usar siempre una BD desechable (`wb_cancel_test`), nunca la de producción. `wb_sale_wholesale_approval` se instala
+explícitamente porque WMDs usa su campo `data_is_wholesale_sale` sin declararlo como dependencia.
 
 ## 10. Estructura
 
 ```
-wb_so_cancel_guarderia/
+wmds_cancel/
 ├── models/stock_warehouse.py   # campos de configuración + _wb_setup_cancel_flow()
 ├── models/sale_order.py        # _action_cancel, reubicación y OUT retenido por despacho
 ├── models/stock_picking.py     # wb_dispatch_hold + no cancelar OUT retenidos
+├── models/wmds_dispatch_hold.py   # decisión por EI y puntos de extensión del despacho de WMDs
+├── controllers/cancel_dispatch.py # ruta /wmds/v2/engine/post/mark_cancelled_shipped
 ├── wizard/dispatch_hold_wizard.py  # «Resolver despacho retenido» (respaldo manual)
 ├── security/ir.model.access.csv
 ├── views/stock_warehouse_views.xml
 ├── views/dispatch_hold_views.xml   # botón en la SO, aviso en el OUT, asistente
 ├── hooks.py                    # configura almacenes de 3 pasos al instalar
+├── scripts/rename_from_wb_so_cancel_guarderia.sql  # migración del nombre anterior
 ├── tests/test_cancel_relocation.py
+├── tests/test_wmds_dispatch_hold.py
 └── docs/SOP_operador_cancelaciones.md
 ```
 

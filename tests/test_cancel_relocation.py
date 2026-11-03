@@ -3,7 +3,7 @@ from unittest.mock import patch
 from odoo.tests import Form, TransactionCase, tagged
 from odoo.tools import mute_logger
 
-SALE_MODULE = 'odoo.addons.wb_so_cancel_guarderia.models.sale_order'
+SALE_MODULE = 'odoo.addons.wmds_cancel.models.sale_order'
 
 
 @tagged('post_install', '-at_install')
@@ -28,7 +28,7 @@ class TestCancelRelocation(TransactionCase):
         cls.product = cls._make_product('Producto CAN')
         cls.partner = cls.env['res.partner'].create({'name': 'Cliente CAN'})
         cls._stock(cls.product, 100)
-        # Stand-in del campo wmds_picked_qty de WMDs (el módulo no depende de WMDs).
+        # Stand-in del campo wmds_picked_qty de WMDs: los tests fijan la recolección sin pasar por WMDs.
         cls.env['ir.model.fields'].create({
             'name': 'x_wmds_picked_qty',
             'model_id': cls.env['ir.model']._get('stock.move.line').id,

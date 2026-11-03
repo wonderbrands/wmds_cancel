@@ -6,7 +6,7 @@ from odoo.tools import float_compare
 
 _logger = logging.getLogger(__name__)
 
-# Campo de WMDs con las piezas ya recolectadas en una línea de PICK (módulo opcional).
+# Campo de WMDs con las piezas ya recolectadas en una línea de PICK.
 PICKED_FIELD = 'wmds_picked_qty'
 
 
@@ -29,7 +29,7 @@ class SaleOrder(models.Model):
                 in_progress[so.id] = so._wb_collect_picked_in_progress()
             except Exception:
                 _logger.exception(
-                    "wb_so_cancel_guarderia: fallo al leer recolección en curso de %s", so.name)
+                    "wmds_cancel: fallo al leer recolección en curso de %s", so.name)
             # SO en despacho: su OUT se retiene (no se cancela) hasta que el despachador
             # indique qué se embarcó. Ver _wb_resolve_dispatch_hold().
             try:
@@ -37,7 +37,7 @@ class SaleOrder(models.Model):
                     so._wb_hold_out_if_in_dispatch()
             except Exception:
                 _logger.exception(
-                    "wb_so_cancel_guarderia: fallo al retener el OUT de %s", so.name)
+                    "wmds_cancel: fallo al retener el OUT de %s", so.name)
         # sale_stock cancela primero los pickings no 'done' (libera reservas) y
         # luego sale.order escribe state='cancel': al volver de super() el stock ya está libre.
         # El contexto evita que se cancelen los OUT retenidos.
@@ -54,7 +54,7 @@ class SaleOrder(models.Model):
                 self._wb_relocate_cancelled_stock(in_progress)
         except Exception:
             _logger.exception(
-                "wb_so_cancel_guarderia: fallo al reubicar stock de %s", self.name)
+                "wmds_cancel: fallo al reubicar stock de %s", self.name)
             self._wb_post_safe(_(
                 "ATENCIÓN: no se pudo generar el traslado de cancelación. "
                 "Revise el log del servidor y reubique el stock manualmente."))
@@ -65,18 +65,23 @@ class SaleOrder(models.Model):
                 self.sudo().message_post(body=body)
         except Exception:
             # Ni siquiera el aviso debe bloquear la cancelación.
-            _logger.exception("wb_so_cancel_guarderia: no se pudo dejar el aviso en %s", self.name)
+            _logger.exception("wmds_cancel: no se pudo dejar el aviso en %s", self.name)
 
     # ------------------------------------------------------------------
     # Despacho en curso: retención del OUT
     # ------------------------------------------------------------------
     def _wb_is_in_dispatch(self):
-        """Gancho: ¿la SO está en proceso de despacho (paquetes posiblemente ya en el
-        contenedor del carrier)? Este módulo no lo sabe; lo responde WMDs (u otro
-        módulo) sobrescribiendo este método. Se usa getattr(super()) para que el orden
-        de carga de los módulos no importe."""
-        parent = getattr(super(), '_wb_is_in_dispatch', None)
-        return parent() if parent else False
+        """¿La SO está en proceso de despacho (paquetes posiblemente ya en el contenedor
+        del carrier)? Sí, si alguna de sus EI está en una sesión de despacho activa de
+        WMDs o ya se entregó a la paquetería."""
+        tags = self.sudo().ei
+        if any(tags.mapped('dispatched')):
+            return True
+        names = tags.mapped('display_name_custom')
+        return bool(names) and bool(self.env['wmds.dispatch.session.line'].sudo().search_count([
+            ('ei_name', 'in', names),
+            ('session_id.state', '=', 'active'),
+        ]))
 
     def _wb_held_pickings(self):
         return self.sudo().picking_ids.filtered(
@@ -192,7 +197,7 @@ class SaleOrder(models.Model):
                 ).button_validate()
         except Exception:
             _logger.exception(
-                "wb_so_cancel_guarderia: no se pudo validar automáticamente %s", picking.name)
+                "wmds_cancel: no se pudo validar automáticamente %s", picking.name)
 
     def _wb_relocate_cancelled_stock(self, in_progress=None):
         self.ensure_one()
