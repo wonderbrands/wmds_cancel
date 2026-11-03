@@ -246,3 +246,12 @@ class WmdsDispatchSessionLineCancelHold(models.Model):
                                 cancel_hold=held_by_so[so_name],
                                 cancel_decision=tag.wmds_cancel_decision if tag else False)
         return res
+
+
+class WmdsFeaturesCancel(models.AbstractModel):
+    _inherit = 'wmds.features'
+
+    def _wmds_features(self):
+        res = super()._wmds_features()
+        res['cancel'] = True
+        return res

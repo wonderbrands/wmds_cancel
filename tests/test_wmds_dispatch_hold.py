@@ -204,3 +204,6 @@ class TestCancelDispatchHold(TransactionCase):
         line = next(l for l in res['lines'] if l['ei_name'] == tags[0].display_name_custom)
         self.assertTrue(line['cancel_hold'])
         self.assertEqual(line['cancel_decision'], 'shipped')
+
+    def test_w10_feature_registered(self):
+        self.assertTrue(self.env['wmds.features']._wmds_features().get('cancel'))

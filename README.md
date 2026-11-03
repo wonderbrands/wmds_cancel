@@ -171,7 +171,7 @@ wmds_cancel/
 ├── models/stock_warehouse.py   # campos de configuración + _wb_setup_cancel_flow()
 ├── models/sale_order.py        # _action_cancel, reubicación y OUT retenido por despacho
 ├── models/stock_picking.py     # wb_dispatch_hold + no cancelar OUT retenidos
-├── models/wmds_dispatch_hold.py   # decisión por EI y puntos de extensión del despacho de WMDs
+├── models/wmds_dispatch_hold.py   # decisión por EI, puntos de extensión del despacho y clave `cancel` en /wmds/v2/features
 ├── controllers/cancel_dispatch.py # ruta /wmds/v2/engine/post/mark_cancelled_shipped
 ├── wizard/dispatch_hold_wizard.py  # «Resolver despacho retenido» (respaldo manual)
 ├── security/ir.model.access.csv
