@@ -24,6 +24,7 @@ traslado que el operador valida con Barcode, dejando trazabilidad.
 | PICK sin validar, **con unidades ya recolectadas en WMDs** *(opcional)* | En el carrito/patín (el sistema aún lo ve en el rack) | CAN **rack(s) de origen → Guardería** con lo recolectado. |
 | PICK validado, PACK sin validar | `Packing Zone` | CAN `Packing Zone → Guardería` *(configurable)*. |
 | PACK validado, OUT pendiente | `Output` | CAN `Output → Guardería`. |
+| OUT pendiente **y paquetes en despacho** (WMDs) | En el camión/contenedor o en staging de embarque | El OUT queda **retenido**; al cerrar el despacho sale al cliente lo embarcado y el resto va a Guardería (ver §3b). |
 | OUT validado parcialmente | `Output` (remanente) | CAN solo por el remanente. |
 | OUT validado completo | Con el cliente | Nada: es una devolución normal. |
 
@@ -43,6 +44,30 @@ almacenes con **entrega en 3 pasos**.
 
 Para la recolección en curso, el módulo lee `wmds_picked_qty` **antes** de cancelar (cancelar el PICK borra esas
 líneas) y genera un solo CAN con una línea por rack real de origen.
+
+## 3b. Cancelación durante el despacho (OUT retenido)
+
+Caso: la SO se cancela cuando sus paquetes (EI) ya están en el despacho y algunos ya entraron al contenedor del
+carrier y no se pueden sacar.
+
+1. **Al cancelar:** si la SO está "en despacho", su OUT **no se cancela**: queda *retenido* (`wb_dispatch_hold`).
+   La SO sí queda cancelada (marketplace y facturación correctos). No se crea CAN de `Output` todavía.
+   - "En despacho" lo responde el método gancho `sale.order._wb_is_in_dispatch()`. Este módulo devuelve `False`;
+     **WMDs** lo sobrescribe: alguna EI de la SO está en una sesión de despacho activa o ya se entregó a la paquetería.
+2. **En el despacho (WMDs):** el modal de cancelados permite, por EI, **retirarla** (escanear, como antes) o marcar
+   **«Ya se embarcó»**. Si la SO tiene varios productos, se elige el producto (1 EI = 1 pieza).
+3. **Al cerrar el despacho** ("Entregar a paquetería") se llama `sale.order._wb_resolve_dispatch_hold({producto: piezas})`:
+   - el OUT se valida **solo por lo embarcado** (sale al cliente como venta normal; Operaciones gestiona la devolución),
+     el resto se cancela sin backorder;
+   - lo que se quedó en `Output` va a Guardería con el CAN de siempre (cálculo de saldo neto).
+4. **Si no se despacha:** al retirar todas las EI de la SO, o al cancelar/limpiar la sesión, se resuelve como
+   "nada embarcado" (solo cuentan las EI que ya se habían entregado antes).
+5. **Respaldo manual:** botón **«Resolver despacho retenido»** en la SO (usuarios de Inventario): indica las piezas
+   embarcadas por producto. Necesario si había EI entregadas antes de la cancelación y la SO tiene varios productos
+   (WMDs no sabe qué producto lleva cada EI).
+
+Ejemplos: SO de 2 productos, se embarcó todo → OUT por 2, sin CAN. Se embarcó 1 y el otro se quedó en staging →
+OUT por 1 y CAN `Output → Guardería` por 1.
 
 ## 4. Protecciones
 
@@ -90,6 +115,12 @@ Ver el SOP para operadores: [`docs/SOP_operador_cancelaciones.md`](docs/SOP_oper
 - **Reapertura de SO:** Odoo 18 no regenera PICK/PACK/OUT al reabrir una SO cuyo flujo ya se hizo; el módulo solo garantiza que no se duplique el CAN.
 - **Paquetes:** con *Poner en paquete* en PACK, el CAN reserva el paquete completo y **llega intacto a Guardería** (no se desempaca).
 - **Salida de Guardería:** aún no hay procedimiento (ver fases).
+- **Cancelación después de validar el OUT:** si la cancelación llega cuando `dispatch_packet` ya validó el OUT, no hay nada
+  que retener: es una devolución normal.
+- **Pedido cancelado antes de escanearse en despacho:** no queda retenido (su stock ya va a Guardería); el modal solo
+  permite retirarlo.
+- **OUT retenido sin resolver:** si nadie cierra el despacho ni usa el botón de la SO, el OUT se queda retenido (visible con
+  un aviso en el OUT y el botón en la SO).
 
 ## 8. Diferencias respecto al diseño original (Odoo 18)
 
@@ -100,9 +131,11 @@ Ver el SOP para operadores: [`docs/SOP_operador_cancelaciones.md`](docs/SOP_oper
 
 ## 9. Pruebas
 
-17 tests (`tests/test_cancel_relocation.py`): flujo completo, PICK sin validar, Packing Zone incluida/excluida, dos SO
+22 tests (`tests/test_cancel_relocation.py`) + 9 de integración en WMDs (`wmds/tests/test_cancel_dispatch_hold.py`): flujo completo, PICK sin validar, Packing Zone incluida/excluida, dos SO
 en la misma zona, reapertura sin duplicados, usuario de Ventas, fallo forzado, configuración idempotente, entrega parcial,
-SO en borrador, almacén sin configurar, paquetes, validación automática y recolección en curso. La recolección en curso se
+SO en borrador, almacén sin configurar, paquetes, validación automática, recolección en curso y OUT retenido por
+despacho (retención, todo embarcado, parcial, nada embarcado, asistente manual; en WMDs: modal, retiro total, sesión
+cancelada, EI entregadas antes de la cancelación). La recolección en curso se
 prueba con un campo sustituto (`x_wmds_picked_qty`); en el ambiente real se validó con WMDs.
 
 ```bash
@@ -118,8 +151,12 @@ Usar siempre una BD desechable (`wb_cancel_test`), nunca la de producción.
 ```
 wb_so_cancel_guarderia/
 ├── models/stock_warehouse.py   # campos de configuración + _wb_setup_cancel_flow()
-├── models/sale_order.py        # _action_cancel y la lógica de reubicación
+├── models/sale_order.py        # _action_cancel, reubicación y OUT retenido por despacho
+├── models/stock_picking.py     # wb_dispatch_hold + no cancelar OUT retenidos
+├── wizard/dispatch_hold_wizard.py  # «Resolver despacho retenido» (respaldo manual)
+├── security/ir.model.access.csv
 ├── views/stock_warehouse_views.xml
+├── views/dispatch_hold_views.xml   # botón en la SO, aviso en el OUT, asistente
 ├── hooks.py                    # configura almacenes de 3 pasos al instalar
 ├── tests/test_cancel_relocation.py
 └── docs/SOP_operador_cancelaciones.md
@@ -129,6 +166,7 @@ wb_so_cancel_guarderia/
 
 | Fase | Tema | Notas |
 |---|---|---|
+| ✅ | **Cancelación durante el despacho** | OUT retenido + decisión por EI en WMDs (§3b). |
 | 2 | **Salida de Guardería** | Inspección → reingreso a `WH/Stock` o scrap, con su propio tipo de operación y SOP. |
 | 3 | **Lotes/series** | Incluir `lot_id` en el saldo y crear los movimientos del CAN con el lote (`# TODO lotes`). |
 | 4 | **Notificaciones** | Actividades/avisos a supervisores cuando hay CAN pendientes, reserva incompleta o stock sin reubicar. |
