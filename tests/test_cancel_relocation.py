@@ -3,7 +3,7 @@ from unittest.mock import patch
 from odoo.tests import Form, TransactionCase, tagged
 from odoo.tools import mute_logger
 
-SALE_MODULE = 'odoo.addons.wb_so_cancel_guarderia.models.sale_order'
+SALE_MODULE = 'odoo.addons.wmds_cancel.models.sale_order'
 
 
 @tagged('post_install', '-at_install')
@@ -28,7 +28,7 @@ class TestCancelRelocation(TransactionCase):
         cls.product = cls._make_product('Producto CAN')
         cls.partner = cls.env['res.partner'].create({'name': 'Cliente CAN'})
         cls._stock(cls.product, 100)
-        # Stand-in del campo wmds_picked_qty de WMDs (el módulo no depende de WMDs).
+        # Stand-in del campo wmds_picked_qty de WMDs: los tests fijan la recolección sin pasar por WMDs.
         cls.env['ir.model.fields'].create({
             'name': 'x_wmds_picked_qty',
             'model_id': cls.env['ir.model']._get('stock.move.line').id,
@@ -110,6 +110,7 @@ class TestCancelRelocation(TransactionCase):
         self.assertEqual(quant, 5)
         self.assertEqual(self._svl_count(), svl_before, "El CAN no debe crear capas de valoración")
         self.assertIn(can.name, self._chatter(so))
+        self.assertTrue(can.name.startswith('%s/CAN/' % self.wh.code), can.name)
 
     # T2
     def test_t2_pick_not_done_no_can(self):
@@ -215,6 +216,19 @@ class TestCancelRelocation(TransactionCase):
             [('sequence_code', '=', 'CAN'), ('warehouse_id', '=', self.wh.id)]), n_type)
         self.assertEqual(self.guard.usage, 'internal')
 
+    def test_t9b_sequence_fixed_to_warehouse_prefix(self):
+        """Un tipo CAN con secuencia sin almacén (CAN00001) pasa a WH/CAN/ sin perder el consecutivo;
+        un prefijo personalizado no se toca."""
+        seq = self.can_type.sequence_id
+        seq.write({'prefix': 'CAN', 'number_next_actual': 7})
+        self.wh._wb_setup_cancel_flow()
+        self.assertEqual(seq.prefix, '%s/CAN/' % self.wh.code)
+        self.assertEqual(seq.number_next_actual, 7)
+        self.assertEqual(seq.padding, 5)
+        seq.prefix = 'GUARD/'
+        self.wh._wb_fix_cancel_sequence()
+        self.assertEqual(seq.prefix, 'GUARD/')
+
     # T10
     def test_t10_partial_delivery_only_remainder(self):
         so = self._make_so(10)
@@ -316,3 +330,97 @@ class TestCancelRelocation(TransactionCase):
         so = self._picked_so(5, 0)
         self._cancel(so)
         self.assertFalse(self._cans(so))
+
+    # ------------------------------------------------------------------
+    # Cancelación durante el despacho (OUT retenido)
+    # ------------------------------------------------------------------
+    def _dispatch_so(self, lines):
+        """SO con PICK y PACK validados (stock en Output) y marcada 'en despacho'."""
+        self.enterContext(patch.object(
+            type(self.env['sale.order']), '_wb_is_in_dispatch', return_value=True))
+        so = self.env['sale.order'].create({
+            'partner_id': self.partner.id,
+            'warehouse_id': self.wh.id,
+            'order_line': [(0, 0, {'product_id': p.id, 'product_uom_qty': q}) for p, q in lines],
+        })
+        so.action_confirm()
+        self._step(so, self.wh.pick_type_id)
+        self._step(so, self.wh.pack_type_id)
+        return so
+
+    def _out(self, so):
+        return so.picking_ids.filtered(lambda p: p.picking_type_id == self.wh.out_type_id)
+
+    def _second_product(self):
+        product = self._make_product('Producto CAN 2')
+        self._stock(product, 50)
+        return product
+
+    def test_t18_dispatch_hold_keeps_out(self):
+        so = self._dispatch_so([(self.product, 2)])
+        self._cancel(so)
+        self.assertEqual(so.state, 'cancel')
+        out = self._out(so)
+        self.assertEqual(out.state, 'assigned', "El OUT retenido no debe cancelarse")
+        self.assertTrue(out.wb_dispatch_hold)
+        self.assertEqual(so.wb_dispatch_hold_count, 1)
+        self.assertFalse(self._cans(so), "No se crea CAN de Output mientras el OUT está retenido")
+        self.assertIn('RETENIDO', self._chatter(so))
+
+    def test_t19_dispatch_all_shipped(self):
+        p2 = self._second_product()
+        so = self._dispatch_so([(self.product, 1), (p2, 1)])
+        self._cancel(so)
+        so._wb_resolve_dispatch_hold({self.product.id: 1, p2.id: 1})
+        out = self._out(so)
+        self.assertEqual(out.state, 'done')
+        self.assertFalse(out.wb_dispatch_hold)
+        self.assertEqual(sorted(out.move_ids.mapped('quantity')), [1, 1])
+        self.assertFalse(self._cans(so))
+        self.assertEqual(so.state, 'cancel')
+        self.assertEqual(so.wb_dispatch_hold_count, 0)
+
+    def test_t20_dispatch_partial_shipped(self):
+        p2 = self._second_product()
+        so = self._dispatch_so([(self.product, 1), (p2, 1)])
+        self._cancel(so)
+        so._wb_resolve_dispatch_hold({self.product.id: 1})
+        out = self._out(so)
+        self.assertEqual(out.state, 'done')
+        done = out.move_ids.filtered(lambda m: m.state == 'done')
+        self.assertEqual(done.product_id, self.product)
+        self.assertEqual(done.quantity, 1)
+        self.assertFalse(self.env['stock.picking'].search([('backorder_id', '=', out.id)]),
+                         "No debe quedar backorder")
+        can = self._cans(so)
+        self.assertEqual(len(can), 1)
+        self.assertEqual(can.location_id, self.out_loc)
+        self.assertEqual(can.move_ids.product_id, p2)
+        self.assertEqual(can.move_ids.product_uom_qty, 1)
+        self.assertEqual(can.state, 'assigned')
+
+    def test_t21_dispatch_nothing_shipped(self):
+        so = self._dispatch_so([(self.product, 2)])
+        self._cancel(so)
+        so._wb_resolve_dispatch_hold({})
+        self.assertEqual(self._out(so).state, 'cancel')
+        can = self._cans(so)
+        self.assertEqual(can.move_ids.product_uom_qty, 2)
+        self.assertEqual(can.location_id, self.out_loc)
+        self.assertFalse(so._wb_resolve_dispatch_hold({}), "Resolver dos veces no hace nada")
+
+    def test_t22_dispatch_hold_wizard(self):
+        p2 = self._second_product()
+        so = self._dispatch_so([(self.product, 2), (p2, 1)])
+        self._cancel(so)
+        action = so.action_wb_open_dispatch_hold_wizard()
+        wizard = self.env['wb.dispatch.hold.wizard'].with_context(action['context']).create({})
+        self.assertEqual(len(wizard.line_ids), 2)
+        wizard.line_ids.filtered(lambda l: l.product_id == self.product).qty_shipped = 1
+        wizard.action_confirm()
+        out = self._out(so)
+        self.assertEqual(out.state, 'done')
+        self.assertEqual(out.move_ids.filtered(lambda m: m.state == 'done').quantity, 1)
+        can = self._cans(so)
+        self.assertEqual(sorted((m.product_id.id, m.product_uom_qty) for m in can.move_ids),
+                         sorted([(self.product.id, 1), (p2.id, 1)]))

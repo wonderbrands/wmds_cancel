@@ -29,7 +29,7 @@ class StockWarehouse(models.Model):
              "lo lleve físicamente a Guardería.")
 
     def _wb_setup_cancel_flow(self):
-        """Crea (solo si falta) la ubicación Guardería y el tipo de operación CAN.
+        """Crea (solo si falta) la ubicación Guardería y el tipo de operación CAN (WH/CAN/00001).
         Idempotente: nunca sobrescribe lo ya configurado."""
         Location = self.env['stock.location'].sudo()
         PickingType = self.env['stock.picking.type'].sudo()
@@ -79,6 +79,26 @@ class StockWarehouse(models.Model):
                         vals['restrict_scan_dest_location'] = 'mandatory'
                     ptype = PickingType.create(vals)
                 wh.wb_cancel_picking_type_id = ptype
+        self._wb_fix_cancel_sequence()
+        return True
+
+    def _wb_fix_cancel_sequence(self):
+        """Deja la secuencia del tipo CAN como <almacén>/CAN/ (p. ej. WH/CAN/00001).
+        Corrige secuencias sin prefijo de almacén (CAN00001); respeta prefijos personalizados."""
+        Sequence = self.env['ir.sequence'].sudo()
+        for wh in self.sudo().filtered('wb_cancel_picking_type_id'):
+            ptype = wh.wb_cancel_picking_type_id
+            code = ptype.sequence_code or 'CAN'
+            prefix = '%s/%s/' % (wh.code, code)
+            seq = ptype.sequence_id
+            if not seq:
+                ptype.sequence_id = Sequence.create({
+                    'name': '%s Sequence %s' % (wh.name, code),
+                    'prefix': prefix, 'padding': 5,
+                    'company_id': wh.company_id.id,
+                })
+            elif seq.prefix in (False, code):
+                seq.write({'name': '%s Sequence %s' % (wh.name, code), 'prefix': prefix})
         return True
 
     def action_wb_setup_cancel_flow(self):
