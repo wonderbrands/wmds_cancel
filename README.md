@@ -2,7 +2,7 @@
 
 Complemento de **WMDs** para Odoo 18 Enterprise que, al **cancelar una orden de venta (SO)**, traslada automáticamente el stock
 que ya había salido de su ubicación a **`WH/Guarderia_Cancelacion`**, usando un tipo de operación propio
-**`WH/CAN` («Traslados de Cancelación»)**.
+**`WH/CAN` («Traslados de Cancelación»)**, cuyos traslados se numeran `WH/CAN/00001`, `WH/CAN/00002`…
 
 > **Estado:** en uso, con tests automáticos. Depende de `wmds` y `sale_stock`; se activa desde
 > **WMDS → Configuración → Ajustes → Complementos → Cancelaciones**.
@@ -83,7 +83,8 @@ OUT por 1 y CAN `Output → Guardería` por 1.
    Complementos → Cancelaciones** y guardar (equivale a instalar `wmds_cancel`). Desmarcarlo lo desinstala.
 2. Al instalar, se configuran solos los almacenes con entrega en 3 pasos (ubicación Guardería + tipo CAN).
    Para otros almacenes: usar el botón **Configurar flujo de cancelación** (es idempotente).
-3. Si ya estaba instalado: actualizar con `-u wmds_cancel` para ver los campos nuevos.
+3. Si ya estaba instalado: actualizar con `-u wmds_cancel` para ver los campos nuevos. Desde la `18.0.2.0.1`, la
+   actualización también corrige la secuencia del tipo CAN si numeraba `CAN00001` (ver §12).
 4. Antes de desinstalarlo, resolver los OUT retenidos: al desinstalar se borran sus campos (la ubicación Guardería y
    los movimientos hechos se conservan).
 
@@ -93,7 +94,7 @@ almacén** → grupo **Cancelaciones de venta** (visible solo con entrega en 3 p
 | Campo | Qué hace | Por defecto |
 |---|---|---|
 | Ubicación Guardería | Destino de los traslados (interna, barcode `<WH>GUARDERIA`). | Se crea sola |
-| Tipo de operación de cancelación | El tipo CAN (barcode `<WH>CAN`, reserva al confirmar, backorder siempre). | Se crea solo |
+| Tipo de operación de cancelación | El tipo CAN (barcode `<WH>CAN`, referencia `<WH>/CAN/00001`, reserva al confirmar, backorder siempre). | Se crea solo |
 | Incluir Packing Zone | Reubica también lo que quedó en `Packing Zone`. | Sí |
 | Incluir recolección en curso | Traslada lo ya recolectado en WMDs cuando el PICK no se validó. | No |
 | Validar CAN automáticamente | Valida el CAN al instante si queda totalmente reservado. | No |
@@ -134,7 +135,7 @@ Ver el SOP para operadores: [`docs/SOP_operador_cancelaciones.md`](docs/SOP_oper
 
 ## 9. Pruebas
 
-22 tests (`tests/test_cancel_relocation.py`) + 9 del despacho en WMDs (`tests/test_wmds_dispatch_hold.py`): flujo completo, PICK sin validar, Packing Zone incluida/excluida, dos SO
+23 tests (`tests/test_cancel_relocation.py`) + 14 del despacho en WMDs (`tests/test_wmds_dispatch_hold.py`): flujo completo, PICK sin validar, Packing Zone incluida/excluida, dos SO
 en la misma zona, reapertura sin duplicados, usuario de Ventas, fallo forzado, configuración idempotente, entrega parcial,
 SO en borrador, almacén sin configurar, paquetes, validación automática, recolección en curso y OUT retenido por
 despacho (retención, todo embarcado, parcial, nada embarcado, asistente manual; en WMDs: modal, retiro total, sesión
@@ -164,6 +165,7 @@ wmds_cancel/
 ├── views/stock_warehouse_views.xml
 ├── views/dispatch_hold_views.xml   # botón en la SO, aviso en el OUT, asistente
 ├── hooks.py                    # configura almacenes de 3 pasos al instalar
+├── migrations/18.0.2.0.1/      # secuencia CAN00001 → WH/CAN/00001
 ├── tests/test_cancel_relocation.py
 ├── tests/test_wmds_dispatch_hold.py
 └── docs/SOP_operador_cancelaciones.md
@@ -179,3 +181,25 @@ wmds_cancel/
 | 4 | **Notificaciones** | Actividades/avisos a supervisores cuando hay CAN pendientes, reserva incompleta o stock sin reubicar. |
 | 5 | **Reporte/tablero** | Stock actual en Guardería por SO de origen y antigüedad. |
 | — | **Decisiones abiertas** | ¿Tipo de operación sin "escanear origen" para recolección en curso? ¿Comportamiento de paquetes en Guardería? ¿Auto-validación en algún escenario? |
+
+## 12. Historial de cambios
+
+### 18.0.2.0.1 — Secuencia `WH/CAN/<consecutivo>`
+
+- Los traslados de cancelación se nombran **`<almacén>/CAN/<consecutivo>`** (`WH/CAN/00001`), igual que
+  `WH/PICK/…` y `WH/OUT/…`, en lugar de `CAN00001`.
+- `stock.warehouse._wb_fix_cancel_sequence()`: si la secuencia del tipo CAN no tiene prefijo de almacén (prefijo
+  vacío o igual a `CAN`), la cambia a `<almacén>/CAN/` **conservando el consecutivo**. Un prefijo personalizado no se
+  toca. La llaman `_wb_setup_cancel_flow()` (instalación y botón *Configurar flujo de cancelación*) y la migración
+  `migrations/18.0.2.0.1/post-migrate.py` (al actualizar con `-u wmds_cancel`).
+- Los traslados ya creados conservan su nombre (`CAN00001`…); solo los nuevos usan el formato nuevo.
+- Prueba nueva: `test_t9b_sequence_fixed_to_warehouse_prefix`; `test_t1` verifica el prefijo `WH/CAN/`.
+
+### 18.0.2.0.0 — Complemento de WMDs 18.0
+
+- Renombrado de `wb_so_cancel_guarderia` a `wmds_cancel`; se activa desde **WMDS → Configuración → Ajustes**.
+- Se engancha al despacho por los puntos de extensión del núcleo (ver `wmds/docs/MODULARIDAD.md`) en lugar de
+  modificar sus controladores, y registra la clave `cancel` en `/wmds/v2/features`.
+- Compatible con el despacho en cola y el escaneo offline de WMDs 18.0: la tarea en cola resuelve las EI retenidas,
+  quitar una línea de una SO cancelada libera la retención, y las consultas por SO se hacen en lote.
+- Instalación nueva en producción: no requiere migración desde `wb_so_cancel_guarderia`.

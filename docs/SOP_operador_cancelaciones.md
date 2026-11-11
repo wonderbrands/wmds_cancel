@@ -3,7 +3,7 @@
 Cuando se cancela una venta, el sistema genera automáticamente traslados para llevar su material a **Guardería**.
 
 1. En la app **Barcode**, abrir la tarjeta **Traslados de Cancelación** (el contador muestra los CAN pendientes).
-2. Abrir el CAN. El campo *Origen* dice `Cancelacion <SO>`; los productos y cantidades ya vienen reservados.
+2. Abrir el CAN (referencia `WH/CAN/00001`, `WH/CAN/00002`…). El campo *Origen* dice `Cancelacion <SO>`; los productos y cantidades ya vienen reservados.
    Puede haber **dos CAN por SO**: uno desde `Packing Zone` y otro desde `Output`.
 3. Localizar físicamente el material de esa SO:
    - Mesa de empaque (`Packing Zone`): puede estar a medio empacar; recogerlo tal cual, **sin terminar de empacar**.

@@ -110,6 +110,7 @@ class TestCancelRelocation(TransactionCase):
         self.assertEqual(quant, 5)
         self.assertEqual(self._svl_count(), svl_before, "El CAN no debe crear capas de valoración")
         self.assertIn(can.name, self._chatter(so))
+        self.assertTrue(can.name.startswith('%s/CAN/' % self.wh.code), can.name)
 
     # T2
     def test_t2_pick_not_done_no_can(self):
@@ -214,6 +215,19 @@ class TestCancelRelocation(TransactionCase):
         self.assertEqual(PickingType.search_count(
             [('sequence_code', '=', 'CAN'), ('warehouse_id', '=', self.wh.id)]), n_type)
         self.assertEqual(self.guard.usage, 'internal')
+
+    def test_t9b_sequence_fixed_to_warehouse_prefix(self):
+        """Un tipo CAN con secuencia sin almacén (CAN00001) pasa a WH/CAN/ sin perder el consecutivo;
+        un prefijo personalizado no se toca."""
+        seq = self.can_type.sequence_id
+        seq.write({'prefix': 'CAN', 'number_next_actual': 7})
+        self.wh._wb_setup_cancel_flow()
+        self.assertEqual(seq.prefix, '%s/CAN/' % self.wh.code)
+        self.assertEqual(seq.number_next_actual, 7)
+        self.assertEqual(seq.padding, 5)
+        seq.prefix = 'GUARD/'
+        self.wh._wb_fix_cancel_sequence()
+        self.assertEqual(seq.prefix, 'GUARD/')
 
     # T10
     def test_t10_partial_delivery_only_remainder(self):

@@ -3,7 +3,7 @@
     'summary': 'Complemento de WMDs: stock de SO canceladas a Guardería (WH/CAN) y OUT retenido si la cancelación llega en pleno despacho',
     'description': 'Complemento de WMDs. Reubica a Guardería (WH/CAN) el stock varado en Packing Zone y Output al cancelar una SO, '
                    'y retiene el OUT cuando la SO se cancela en pleno despacho. Se activa en WMDS → Configuración → Ajustes. Ver README.md.',
-    'version': '18.0.2.0.0',
+    'version': '18.0.2.0.1',
     'category': 'Inventory/Inventory',
     'author': 'Wonderbrands',
     'license': 'LGPL-3',
