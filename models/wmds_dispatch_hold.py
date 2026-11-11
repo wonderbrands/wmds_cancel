@@ -201,14 +201,16 @@ class WmdsDispatchSessionCancelHold(models.Model):
     def _wmds_after_line_removed(self, ei_name, so_name, cancelled_removal=False, operator=None):
         res = super()._wmds_after_line_removed(
             ei_name, so_name, cancelled_removal=cancelled_removal, operator=operator)
-        if not cancelled_removal:
+        # Se mira el estado real de la orden y no solo cancelled_removal: la guía pudo quitarse
+        # con el botón de la fila si la cancelación llegó después de escanearla.
+        so = self.env['sale.order'].sudo().search([('name', '=', so_name)], limit=1) if so_name else False
+        if not (cancelled_removal or (so and so.state == 'cancel')):
             return res
         tag = self.env["sale.order.ei"].sudo().search([('display_name_custom', '=', ei_name)], limit=1)
         if tag:
             tag.write({'wmds_cancel_decision': 'removed', 'wmds_cancel_product_id': False})
         # Si ya no queda ninguna EI de esa orden retenida en despacho, se resuelve:
         # lo retirado (y no entregado) va a Guardería.
-        so = self.env['sale.order'].sudo().search([('name', '=', so_name)], limit=1) if so_name else False
         if so and so._wmds_is_cancel_held():
             remaining = self.env["wmds.dispatch.session.line"].sudo().search_count([
                 ('so_name', '=', so_name),
@@ -235,15 +237,13 @@ class WmdsDispatchSessionLineCancelHold(models.Model):
         tag_by_name = {}
         for tag in tags:
             tag_by_name.setdefault(tag.display_name_custom, tag)
-        held_by_so = {}
+        so_names = [n for n in set(self.mapped('so_name')) if n]
+        sales = self.env['sale.order'].sudo().search([('name', 'in', so_names)]) if so_names else []
+        held_by_so = {so.name: so._wmds_is_cancel_held() for so in sales}
         for line in self:
-            so_name = line.so_name
-            if so_name not in held_by_so:
-                so = self.env['sale.order'].sudo().search([('name', '=', so_name)], limit=1) if so_name else False
-                held_by_so[so_name] = bool(so) and so._wmds_is_cancel_held()
             tag = tag_by_name.get(line.ei_name)
             res[line.id] = dict(res.get(line.id, {}),
-                                cancel_hold=held_by_so[so_name],
+                                cancel_hold=held_by_so.get(line.so_name, False),
                                 cancel_decision=tag.wmds_cancel_decision if tag else False)
         return res
 
